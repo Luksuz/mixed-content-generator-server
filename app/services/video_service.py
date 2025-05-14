@@ -125,17 +125,34 @@ async def create_video_task(
         filelist_path_part1 = os.path.join(temp_dir, f"filelist_part1-{unique_suffix}.txt")
         async with aiofiles.open(filelist_path_part1, 'w') as f:
             await f.write(filelist_content_part1)
-        logger.debug(f"[{video_id}] Part 1 filelist content:\n{filelist_content_part1}")
+        
+        # New VF for Part 1: Scale to cover 1024x720, then center crop
+        # Input images are 1792x1024. Target is 1024x720.
+        # We need to scale so that the image covers the 1024x720 area, then crop.
+        # scale=w='max(iw*target_h/ih,target_w)':h='max(target_h,ih*target_w/iw)'
+        # Simplified: scale to be at least target_w wide and target_h tall, then crop.
+        # Example: scale='max(1024,ih*1024/720)':'max(720,iw*720/1024)' - this is a bit complex.
+        # Easier: scale so one dimension fits and the other overflows, then crop.
+        # To cover 1024x720: scale to width 1024, height will be 1024 * (1024/1792) = 585 (too small)
+        # OR scale to height 720, width will be 720 * (1792/1024) = 1260 (covers width)
+        # So, we scale to the height that ensures coverage, or width that ensures coverage.
+        # General formula: scale=w=max(iw*Th/ih, Tw):h=max(Th, ih*Tw/iw)
+        # iw=1792, ih=1024, Tw=1024, Th=720
+        # w = max(1792*720/1024, 1024) = max(1260, 1024) = 1260
+        # h = max(720, 1024*1024/1792) = max(720, 585.14) = 720
+        # So scale=1260:720. Then crop to 1024x720.
+        # The filter [0:v]scale=iw*max(1024/iw\,720/ih):ih*max(1024/iw\,720/ih),crop=1024:720
+        # A more common "cover" approach:
+        vf_part1 = (
+            f"scale='{settings.target_video_width}:{settings.target_video_height}:force_original_aspect_ratio=increase',"
+            f"crop={settings.target_video_width}:{settings.target_video_height}:(iw-{settings.target_video_width})/2:(ih-{settings.target_video_height})/2,"
+            f"format=pix_fmts=yuv420p"
+        )
 
         ffmpeg_args_part1 = [
-            '-f', 'concat',
-            '-safe', '0',
-            '-i', filelist_path_part1,
-            '-vf', f'scale={settings.target_video_width}:{settings.target_video_height}:force_original_aspect_ratio=decrease,pad={settings.target_video_width}:{settings.target_video_height}:(ow-iw)/2:(oh-ih)/2:color=black,format=pix_fmts=yuv420p',
-            '-r', str(settings.target_fps),
-            '-t', str(actual_slideshow_duration), # Use calculated duration
-            '-y', # Overwrite output without asking
-            part1_output_path
+            '-f', 'concat','-safe', '0','-i', filelist_path_part1,
+            '-vf', vf_part1, # Use the new cover & crop vf
+            '-r', str(settings.target_fps), '-y', part1_output_path # Removed -t, duration should be controlled by filelist
         ]
         success, _, stderr = await run_ffmpeg_async(ffmpeg_args_part1, f"[{video_id}] Part 1 (Slideshow)")
         if not success:
@@ -152,42 +169,55 @@ async def create_video_task(
             # Check if high-quality zoom is enabled in settings
             use_hq_zoom = getattr(settings, 'use_high_quality_zoom', False)
             
-            if True:
-                # High-quality zoom with large initial scale and linear zoom
-                # This creates a smoother zoom but requires significantly more processing power and time
-                logger.info(f"[{video_id}] Using high-quality zoom effect (higher resolution and framerate)")
+            if use_hq_zoom:
+                # High-quality alternating (ping-pong) zoom effect
+                logger.info(f"[{video_id}] Using high-quality alternating zoom effect.")
                 
-                # Get zoom settings from config or use defaults
-                hq_input_framerate = getattr(settings, 'hq_zoom_input_framerate', 25)
-                hq_output_framerate = getattr(settings, 'hq_zoom_output_framerate', 25)
-                hq_initial_scale = getattr(settings, 'hq_zoom_initial_scale', 4000)
-                hq_zoom_increment = getattr(settings, 'hq_zoom_increment', 0.001)
+                # Get alternating zoom settings from config
+                input_fps = settings.hq_zoom_input_framerate # e.g., 25
+                output_fps = settings.hq_zoom_output_framerate # e.g., 25
+                initial_scale_width = settings.hq_zoom_initial_scale # e.g., 4000
                 
-                # Calculate frames needed based on duration and framerate
-                total_zoom_frames = int(actual_zoom_duration * hq_output_framerate)
+                pingpong_increment = settings.hq_zoom_pingpong_increment # e.g., 0.0015
+                one_direction_duration_s = settings.hq_zoom_pingpong_duration_s # e.g., 20 seconds
+                max_zoom_factor = settings.hq_zoom_max_factor # e.g., 1.5
+                min_zoom_factor = 1.0 # Standard minimum zoom
+
+                one_direction_frames = int(one_direction_duration_s * output_fps)
+                full_cycle_frames = one_direction_frames * 2
                 
-                # This uses a moderately large initial scale and linear zoom increment for smoothness
-                # while being less resource-intensive than the original high quality settings
+                # Total frames for the entire zoom duration of this video part
+                total_duration_frames = int(actual_zoom_duration * output_fps)
+                
+                # Construct the z expression for zoompan
+                # 'on' is the output frame number, starting from 0
+                # 'zoom' is the zoom level from the previous frame (starts at 1.0)
+                z_expression = (
+                    f"if(lt(mod(on,{full_cycle_frames}),{one_direction_frames}),"
+                    f"min(zoom+{pingpong_increment},{max_zoom_factor}),"
+                    f"max(zoom-{pingpong_increment},{min_zoom_factor}))"
+                )
+                
                 zoom_pan_vf = (
-                    f"scale={hq_initial_scale}:-1,"  # Scale to large but reasonable size
-                    f"zoompan=z='zoom+{hq_zoom_increment}':" # Linear zoom (still smoother than sine wave)
-                    f"x='iw/2-(iw/zoom/2)':"  # Center horizontally
-                    f"y='ih/2-(ih/zoom/2)':"  # Center vertically 
-                    f"d={total_zoom_frames}:"  # Duration in frames
-                    f"s={settings.target_video_width}x{settings.target_video_height}:" # Use existing resolution
-                    f"fps={hq_output_framerate},"  # Moderate framerate (25fps)
-                    f"format=pix_fmts=yuv420p"  # Standard pixel format for compatibility
+                    f"scale={initial_scale_width}:-1," # Upscale width, maintain aspect ratio
+                    f"zoompan=z='{z_expression}':" 
+                    f"x='iw/2-(iw/zoom/2)':" 
+                    f"y='ih/2-(ih/zoom/2)':" 
+                    f"d={total_duration_frames}:" # Duration in frames for the entire output segment
+                    f"s={settings.target_video_width}x{settings.target_video_height}:" # Output resolution
+                    f"fps={output_fps}," 
+                    f"format=pix_fmts=yuv420p"
                 )
                 
                 ffmpeg_args_part2 = [
                     '-loop', '1',
-                    '-framerate', str(hq_input_framerate), # High input framerate
+                    '-framerate', str(input_fps),
                     '-i', last_image_path,
                     '-vf', zoom_pan_vf,
-                    '-t', str(actual_zoom_duration),
+                    '-t', str(actual_zoom_duration), # Total duration of this zoom part
                     '-c:v', 'libx264',
-                    '-preset', settings.ffmpeg_preset,  # Use configured preset (e.g. 'medium', 'slow')
-                    '-crf', str(settings.ffmpeg_crf),  # Use configured quality
+                    '-preset', settings.ffmpeg_preset,
+                    '-crf', str(settings.ffmpeg_crf),
                     '-y',
                     part2_output_path
                 ]
@@ -256,78 +286,72 @@ async def create_video_task(
             if not success:
                 raise RuntimeError(f"Failed intermediate concatenation: {stderr}")
 
-        logger.info(f"[{video_id}] Intermediate combined video generated: {combined_video_no_audio_subs_path}")
+        logger.info(f"[{video_id}] Intermediate combined video (no audio/subs): {combined_video_no_audio_subs_path}")
 
-        # --- NEW: SUBTITLE GENERATION AND PROCESSING --- 
-        generated_srt_ready_for_burn = False
-        if successfully_downloaded_audio:
-            logger.info(f"[{video_id}] Starting audio transcription for subtitles...")
-            transcribed_ok = await generate_srt_from_audio(successfully_downloaded_audio, initial_srt_path, model_name=settings.whisper_model)
-            if transcribed_ok and os.path.exists(initial_srt_path):
-                logger.info(f"[{video_id}] Transcription successful: {initial_srt_path}. Reformatting SRT...")
-                reformatted_ok = await reformat_srt_file_timed_async(initial_srt_path, reformatted_srt_path, max_words=settings.srt_max_words_per_line)
-                if reformatted_ok and os.path.exists(reformatted_srt_path):
-                    logger.info(f"[{video_id}] SRT reformatted successfully: {reformatted_srt_path}")
-                    generated_srt_ready_for_burn = True
-                else:
-                    logger.warning(f"[{video_id}] SRT reformatting failed for {initial_srt_path}")
-            else:
-                logger.warning(f"[{video_id}] Transcription failed or initial SRT not found. Skipping subtitles.")
-        else:
-            logger.info(f"[{video_id}] No audio downloaded, skipping subtitle generation.")
+        # --- NEW: SUBTITLE GENERATION AND PROCESSING (COMMENTED OUT) --- 
+        generated_srt_ready_for_burn = False # Subtitles are disabled
+        # if successfully_downloaded_audio:
+        #     logger.info(f"[{video_id}] Starting audio transcription for subtitles...")
+        #     transcribed_ok = await generate_srt_from_audio(successfully_downloaded_audio, initial_srt_path, model_name=settings.whisper_model)
+        #     if transcribed_ok and os.path.exists(initial_srt_path):
+        #         logger.info(f"[{video_id}] Transcription successful: {initial_srt_path}. Reformatting SRT...")
+        #         reformatted_ok = await reformat_srt_file_timed_async(initial_srt_path, reformatted_srt_path, max_words=settings.srt_max_words_per_line)
+        #         if reformatted_ok and os.path.exists(reformatted_srt_path):
+        #             logger.info(f"[{video_id}] SRT reformatted successfully: {reformatted_srt_path}")
+        #             generated_srt_ready_for_burn = True
+        #         else:
+        #             logger.warning(f"[{video_id}] SRT reformatting failed for {initial_srt_path}")
+        #     else:
+        #         logger.warning(f"[{video_id}] Transcription failed or initial SRT not found. Skipping subtitles.")
+        # else:
+        #     logger.info(f"[{video_id}] No audio downloaded, skipping subtitle generation.")
+        logger.info(f"[{video_id}] Subtitle generation and burning is currently commented out.")
 
-        # --- NEW: BURN SUBTITLES ONTO VIDEO (if SRT is ready) --- 
-        current_video_base_for_final_step = combined_video_no_audio_subs_path
-        if generated_srt_ready_for_burn:
-            video_with_subs_path = os.path.join(temp_dir, f"video_with_subs-{unique_suffix}.mp4")
-            logger.info(f"[{video_id}] Burning subtitles from {reformatted_srt_path} onto {combined_video_no_audio_subs_path}")
+        # --- NEW: BURN SUBTITLES ONTO VIDEO (COMMENTED OUT) --- 
+        current_video_base_for_final_step = combined_video_no_audio_subs_path # Default to video without subs
+        # if generated_srt_ready_for_burn: # This condition will now always be false
+        #     video_with_subs_path = os.path.join(temp_dir, f"video_with_subs-{unique_suffix}.mp4")
+        #     logger.info(f"[{video_id}] Burning subtitles from {reformatted_srt_path} onto {combined_video_no_audio_subs_path}")
             
-            # Prepare subtitle styling from settings (similar to video_w_subtitles.py)
-            # Assuming font file path is in settings.subtitle_font_file like "assets/fonts/noto-sans.ttf"
-            # Ensure this font file is accessible from the application's root or an absolute path.
-            font_file_path = os.path.abspath(settings.subtitle_font_file) 
-            if not os.path.exists(font_file_path):
-                logger.warning(f"[{video_id}] Subtitle font file not found: {font_file_path}. Subtitles might not use custom font.")
-                # Potentially fallback to default font by not specifying Fontfile, or raise error
-                # For now, we proceed, FFmpeg/libass will use a default.
-                font_file_filter_path = "" # No specific font file
-            else:
-                 # FFmpeg Fontfile option needs a path. For robustness, use forward slashes.
-                font_file_filter_path = font_file_path.replace(os.sep, '/')
+        #     font_file_path = os.path.abspath(settings.subtitle_font_file) 
+        #     if not os.path.exists(font_file_path):
+        #         logger.warning(f"[{video_id}] Subtitle font file not found: {font_file_path}. Subtitles might not use custom font.")
+        #         font_file_filter_path = "" 
+        #     else:
+        #         font_file_filter_path = font_file_path.replace(os.sep, '/')
             
-            abs_reformatted_srt_path = os.path.abspath(reformatted_srt_path).replace(os.sep, '/')
+        #     abs_reformatted_srt_path = os.path.abspath(reformatted_srt_path).replace(os.sep, '/')
 
-            base_subtitle_string = f"subtitles='{abs_reformatted_srt_path}'"
-            style_parts = []
-            if font_file_filter_path:
-                 style_parts.append(f"Fontfile='{font_file_filter_path}'")
-            style_parts.append(f"Fontsize={settings.subtitle_font_size}")
-            style_parts.append(f"PrimaryColour={settings.subtitle_primary_colour}")
-            style_parts.append(f"OutlineColour={settings.subtitle_outline_colour}")
-            style_parts.append(f"BorderStyle={settings.subtitle_border_style}")
-            style_parts.append(f"Outline={settings.subtitle_outline_thickness}")
-            style_parts.append(f"MarginV={settings.subtitle_margin_v}")
-            style_parts.append(f"WrapStyle={settings.subtitle_wrap_style}") # e.g., 2 for no word wrap
+        #     base_subtitle_string = f"subtitles='{abs_reformatted_srt_path}'"
+        #     style_parts = []
+        #     if font_file_filter_path:
+        #          style_parts.append(f"Fontfile='{font_file_filter_path}'")
+        #     style_parts.append(f"Fontsize={settings.subtitle_font_size}")
+        #     style_parts.append(f"PrimaryColour={settings.subtitle_primary_colour}")
+        #     style_parts.append(f"OutlineColour={settings.subtitle_outline_colour}")
+        #     style_parts.append(f"BorderStyle={settings.subtitle_border_style}")
+        #     style_parts.append(f"Outline={settings.subtitle_outline_thickness}")
+        #     style_parts.append(f"MarginV={settings.subtitle_margin_v}")
+        #     style_parts.append(f"WrapStyle={settings.subtitle_wrap_style}")
             
-            force_style_value = ",".join(style_parts)
-            subtitle_filter_value = f"{base_subtitle_string}:force_style='{force_style_value}'"
+        #     force_style_value = ",".join(style_parts)
+        #     subtitle_filter_value = f"{base_subtitle_string}:force_style='{force_style_value}'"
 
-            ffmpeg_args_burn_subs = [
-                '-i', combined_video_no_audio_subs_path,
-                '-vf', subtitle_filter_value,
-                '-c:a', 'copy', # Video likely has no audio yet, but good practice if it did
-                '-c:v', 'libx264', '-preset', 'fast', '-crf', '23', # Re-encode for burning
-                '-y', video_with_subs_path
-            ]
-            success, _, stderr = await run_ffmpeg_async(ffmpeg_args_burn_subs, f"[{video_id}] Burning Subtitles")
-            if success:
-                logger.info(f"[{video_id}] Subtitles burned successfully: {video_with_subs_path}")
-                current_video_base_for_final_step = video_with_subs_path
-            else:
-                logger.error(f"[{video_id}] Failed to burn subtitles. Error: {stderr}. Proceeding without hardcoded subtitles.")
-                # current_video_base_for_final_step remains combined_video_no_audio_subs_path
+        #     ffmpeg_args_burn_subs = [
+        #         '-i', combined_video_no_audio_subs_path,
+        #         '-vf', subtitle_filter_value,
+        #         '-c:a', 'copy',
+        #         '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+        #         '-y', video_with_subs_path
+        #     ]
+        #     success, _, stderr = await run_ffmpeg_async(ffmpeg_args_burn_subs, f"[{video_id}] Burning Subtitles")
+        #     if success:
+        #         logger.info(f"[{video_id}] Subtitles burned successfully: {video_with_subs_path}")
+        #         current_video_base_for_final_step = video_with_subs_path
+        #     else:
+        #         logger.error(f"[{video_id}] Failed to burn subtitles. Error: {stderr}. Proceeding without hardcoded subtitles.")
 
-        # --- PART 4: Add Audio and Dust Overlay --- 
+        # --- PART 4: Add Audio (and potentially other overlays like Dust) --- 
         final_video_filename = f"video-{video_id}.mp4" # Use persistent ID in final name
         final_video_path_local = os.path.join(settings.output_dir, final_video_filename)
         
