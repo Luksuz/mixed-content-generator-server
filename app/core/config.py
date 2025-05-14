@@ -30,23 +30,23 @@ class Settings(BaseSettings):
     srt_max_words_per_line: int = os.getenv("SRT_MAX_WORDS_PER_LINE", 4)
     
     # FFmpeg encoding settings
-    ffmpeg_preset: str = os.getenv("FFMPEG_PRESET", "medium")
-    ffmpeg_crf: int = os.getenv("FFMPEG_CRF", 23)
-    ffmpeg_audio_bitrate: str = os.getenv("FFMPEG_AUDIO_BITRATE", "192k") # Added for completeness
+    ffmpeg_preset: str = os.getenv("FFMPEG_PRESET", "ultrafast")
+    ffmpeg_crf: int = os.getenv("FFMPEG_CRF", 26)
+    ffmpeg_audio_bitrate: str = os.getenv("FFMPEG_AUDIO_BITRATE", "96k")
     
     # Subtitle styling parameters
-    subtitle_font_size: str = os.getenv("SUBTITLE_FONT_SIZE", "24") # Kept as string from previous edit
-    subtitle_primary_colour: str = os.getenv("SUBTITLE_PRIMARY_COLOUR", "&H00FFFFFF&") # White, leading 00 for Alpha
-    subtitle_outline_colour: str = os.getenv("SUBTITLE_OUTLINE_COLOUR", "&H00000000&") # Black, leading 00 for Alpha
-    subtitle_border_style: str = os.getenv("SUBTITLE_BORDER_STYLE", "1") # 1=outline
+    subtitle_font_size: str = os.getenv("SUBTITLE_FONT_SIZE", "24")
+    subtitle_primary_colour: str = os.getenv("SUBTITLE_PRIMARY_COLOUR", "&H00FFFFFF&")
+    subtitle_outline_colour: str = os.getenv("SUBTITLE_OUTLINE_COLOUR", "&H00000000&")
+    subtitle_border_style: str = os.getenv("SUBTITLE_BORDER_STYLE", "1")
     subtitle_outline_thickness: str = os.getenv("SUBTITLE_OUTLINE_THICKNESS", "2.0")
     subtitle_margin_v: str = os.getenv("SUBTITLE_MARGIN_V", "30")
-    subtitle_wrap_style: str = os.getenv("SUBTITLE_WRAP_STYLE", "2") # 2=no word wrap
+    subtitle_wrap_style: str = os.getenv("SUBTITLE_WRAP_STYLE", "2")
     
     # Target video properties
     target_video_width: int = 1024
     target_video_height: int = 720
-    target_fps: int = 30 # For non-HQ zoom parts and slideshow
+    target_fps: int = 30
 
     class Config:
         env_file = '.env'
