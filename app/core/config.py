@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     supabase_url: str = os.getenv("SUPABASE_URL", "")
     supabase_key: str = os.getenv("SUPABASE_KEY", "")
     supabase_bucket_name: str = os.getenv("SUPABASE_BUCKET_NAME", "video-generator")
+    openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
     dust_overlay_file_name: str = os.getenv("DUST_OVERLAY_FILE_NAME", "output.webm")
     temp_dir_base: str = os.path.join(os.getcwd(), "temp-video-processing")
     output_dir: str = os.path.join(os.getcwd(), "public", "generated-videos")
