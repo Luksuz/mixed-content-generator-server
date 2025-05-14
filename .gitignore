@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment
+.env
+*.env.*
+!*.env.example
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Temporary files
+temp-*/
+temp-*-*/
+*.part
+
+# Output
+public/generated-videos/
+
+# IDEs/Editors
+.idea/
+.vscode/ 
