@@ -32,4 +32,4 @@ public/generated-videos/
 .idea/
 .vscode/ 
 
-./public/generated-videos/
+public

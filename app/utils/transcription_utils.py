@@ -3,7 +3,7 @@ import asyncio
 # import whisper # type: ignore -> No longer using local whisper library
 # from datetime import timedelta -> No longer manually building timestamps
 from openai import OpenAI # type: ignore
-from app.core.config import settings # Import settings
+from core.config import settings # Import settings
 
 # Ensure OPENAI_API_KEY is set in your environment variables
 
